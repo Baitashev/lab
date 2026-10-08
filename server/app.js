@@ -346,6 +346,8 @@ export function createApp({ db, env = {}, now = () => Date.now(), rnd = Math.ran
     } catch (e) {
       if (e instanceof HttpError) return json(e.status, { error: { code: e.code, message: e.message, ...e.extra } });
       console.error(e);
+      // Для диагностики при настройке показываем настоящую причину (например, неверный токен базы)
+      if (url.pathname === "/api/health") return json(500, { ok: false, error: { code: "DB", message: String(e.message || e) } });
       return json(500, { error: { code: "SERVER", message: "Ошибка сервера. Попробуйте ещё раз через минуту." } });
     }
   };

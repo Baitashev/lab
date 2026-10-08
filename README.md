@@ -2,10 +2,12 @@
 
 Сюжетная веб-игра по теории судебной экспертизы КР (лекции 2–3). Стажёр проходит смену из 4 глав и 17 дел, собирает улики и раскрывает главное дело. Есть рейтинг группы и кабинет руководителя.
 
-**Стек:** Node.js 22 без зависимостей. Бэкенд — REST API (`server/`), база — SQLite: локально через `node:sqlite`, в облаке через [Turso](https://turso.tech) по HTTP. Фронтенд — ES-модули без сборки (`public/`). Хостинг — Vercel: статика + одна serverless-функция.
+**Стек:** Node.js 22 без зависимостей. Бэкенд — REST API (`server/`), база — SQLite: локально через `node:sqlite`, в облаке через [Turso](https://turso.tech) по HTTP. Фронтенд — ES-модули без сборки (`public/`). Хостинг на выбор: Netlify или Vercel (статика + одна serverless-функция) либо Render (один долгоживущий Node-процесс).
 
 ```
 api/index.js            вход для Vercel (все /api/* → сюда, см. vercel.json)
+netlify/functions/api.mjs  вход для Netlify (Request/Response, см. netlify.toml)
+render.yaml             настройки Render: `npm start` запускает server/local.js
 server/
   app.js                маршруты и логика API (не зависит от платформы)
   auth.js               вход руководителя: пароль из ADMIN_PASSWORD, сессия в HttpOnly-cookie, защита от перебора и CSRF
@@ -28,13 +30,13 @@ tests/                  node:test — API на SQLite в памяти, адап�
 
 ```bash
 npm start            # http://localhost:3000, кабинет: /#/admin, пароль admin
-npm test             # 6 сквозных тестов
+npm test             # 7 тестов: API, Turso, адаптеры Vercel и Netlify
 ADMIN_PASSWORD=секрет PORT=8080 npm start
 ```
 
 Нужен Node.js 22.5 или новее: в нём есть встроенный `node:sqlite`. Ставить пакеты не нужно.
 
-## Переменные окружения (Vercel)
+## Переменные окружения (Netlify / Render / Vercel)
 
 | Переменная | Что это |
 |---|---|

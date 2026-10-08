@@ -1,0 +1,15 @@
+# Настройки для Netlify: сайт из папки public, API — функция netlify/functions/api.mjs
+[build]
+  publish = "public"
+  command = ""
+
+[functions]
+  node_bundler = "esbuild"
+  included_files = ["server/**"]
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "same-origin"
+    X-Frame-Options = "DENY"

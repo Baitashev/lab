@@ -1,0 +1,18 @@
+# Настройки для Render (Blueprint): один веб-сервис, который отдаёт и сайт, и API.
+services:
+  - type: web
+    name: ekspert-lab
+    runtime: node
+    plan: free
+    buildCommand: "true"
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
