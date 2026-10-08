@@ -44,6 +44,8 @@ export function createTurso({ url, token, fetchImpl = fetch }) {
     async all(sql, args = []) { return (await pipeline([{ sql, args }]))[0].rows; },
     async get(sql, args = []) { return (await pipeline([{ sql, args }]))[0].rows[0] ?? null; },
     async run(sql, args = []) { return { changes: (await pipeline([{ sql, args }]))[0].changes }; },
+    /** Несколько запросов за один HTTP-запрос и на одном соединении. */
+    async batch(stmts) { return pipeline(stmts); },
     async exec(script) {
       const stmts = script.split(/;\s*(?:\n|$)/).map(s => s.trim()).filter(Boolean).map(sql => ({ sql }));
       await pipeline(stmts);

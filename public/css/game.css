@@ -206,3 +206,9 @@
 /* ===================== Рейтинг ===================== */
 .lb-head { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; }
 .solved-mark { color: var(--ok); font-weight: 700; }
+
+/* Мгновенный отклик на нажатие, пока сервер проверяет ответ */
+.opt.pending { border-color: var(--text); transform: translateX(4px); position: relative; }
+.opt.pending::after { content: ""; position: absolute; right: 14px; top: 50%; width: 16px; height: 16px; margin-top: -8px; border: 2.5px solid var(--line); border-top-color: var(--text); border-radius: 50%; animation: spin .7s linear infinite; }
+.folder.checking .opt:not(.pending) { opacity: .6; }
+.folder.skeleton { animation: none; }

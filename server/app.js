@@ -20,11 +20,20 @@ export function createApp({ db, env = {}, now = () => Date.now(), rnd = Math.ran
 
   /* ------------------------------ Попытки ------------------------------ */
 
-  async function loadAttempt(id) {
-    const a = await db.get(`SELECT a.*, p.name, p.group_name, p.avatar FROM attempts a JOIN players p ON p.id = a.player_id WHERE a.id = ?`, [id]);
+  const SELECT_ATTEMPT = `SELECT a.*, p.name, p.group_name, p.avatar FROM attempts a JOIN players p ON p.id = a.player_id WHERE a.id = ?`;
+  const SELECT_ANSWERS = "SELECT position, correct FROM answers WHERE attempt_id = ? ORDER BY position";
+
+  function parseAttempt(a) {
     if (!a) throw new HttpError(404, "NOT_FOUND", "Попытка не найдена. Начните заново с главной страницы.");
     a.deck = JSON.parse(a.deck);
     return a;
+  }
+  async function loadAttempt(id) { return parseAttempt(await db.get(SELECT_ATTEMPT, [id])); }
+
+  /** Попытка и её ответы — за один запрос к базе. */
+  async function loadFull(id) {
+    const [att, ans] = await db.batch([{ sql: SELECT_ATTEMPT, args: [id] }, { sql: SELECT_ANSWERS, args: [id] }]);
+    return { a: parseAttempt(att.rows[0]), rows: ans.rows };
   }
 
   async function chapterProgress(attemptId, rows = null) {
@@ -61,29 +70,38 @@ export function createApp({ db, env = {}, now = () => Date.now(), rnd = Math.ran
     const orig = !late && k >= 0 ? item.order[k] : null;
     const correct = orig === 0;
     const points = pointsFor(correct, ms);
-    const upd = await db.run(
-      `UPDATE attempts SET position = position + 1, shown_at = NULL, score = score + ?, correct = correct + ?
-       WHERE id = ? AND position = ? AND status = 'active'`, [points, correct ? 1 : 0, a.id, pos]);
+    // Один запрос к базе: сдвигаем позицию (только если её никто не сдвинул раньше) и записываем ответ.
+    // answer_token гарантирует, что ответ запишет именно тот запрос, который сдвинул позицию.
+    const token = randomUUID();
+    const [upd, , ans] = await db.batch([
+      { sql: `UPDATE attempts SET position = position + 1, shown_at = NULL, score = score + ?, correct = correct + ?, answer_token = ?
+              WHERE id = ? AND position = ? AND status = 'active'`, args: [points, correct ? 1 : 0, token, a.id, pos] },
+      { sql: `INSERT INTO answers (attempt_id, position, case_id, option_index, correct, ms, points, created_at)
+              SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE (SELECT answer_token FROM attempts WHERE id = ?) = ?`,
+        args: [a.id, pos, item.id, orig, correct ? 1 : 0, Math.min(ms, RULES.TIME_LIMIT_MS), points, now(), a.id, token] },
+      { sql: SELECT_ANSWERS, args: [a.id] },
+    ]);
     if (!upd.changes) throw new HttpError(409, "STALE", "Этот ответ уже засчитан.");
-    await db.run(`INSERT INTO answers (attempt_id, position, case_id, option_index, correct, ms, points, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [a.id, pos, item.id, orig, correct ? 1 : 0, Math.min(ms, RULES.TIME_LIMIT_MS), points, now()]);
     a.position = pos + 1; a.shown_at = null; a.score += points; a.correct += correct ? 1 : 0;
     return {
       position: pos, correct, timeout: late || k < 0, chosen: late ? null : optionId,
       correctOption: RULES.OPTION_IDS[item.order.indexOf(0)], points, explain: c.explain, score: a.score,
+      rows: ans.rows,
     };
   }
 
   /** Если игрок ушёл и время вышло — засчитываем тайм-аут, чтобы нельзя было «подумать» вне игры. */
+  /** → true, если пришлось засчитать тайм-аут (тогда данные попытки нужно перечитать). */
   async function settleTimeouts(a) {
     if (a.status === "active" && a.position < a.total && expired(a)) {
-      try { await record(a, null); } catch (e) { if (e.code !== "STALE") throw e; return loadAttempt(a.id); }
+      try { await record(a, null); } catch (e) { if (e.code !== "STALE") throw e; }
+      return true;
     }
-    return a;
+    return false;
   }
 
-  async function stateOf(a) {
-    const rows = await db.all("SELECT position, correct FROM answers WHERE attempt_id = ? ORDER BY position", [a.id]);
+  async function stateOf(a, rows) {
+    rows ??= await db.all(SELECT_ANSWERS, [a.id]);
     const chapters = await chapterProgress(a.id, rows);
     const phase = a.status === "done" ? "done" : a.position < a.total ? "question" : "deduction";
     return {
@@ -110,16 +128,19 @@ export function createApp({ db, env = {}, now = () => Date.now(), rnd = Math.ran
 
   /* ------------------------------ Рейтинг ------------------------------ */
 
-  async function leaderboardRows(group = null) {
-    const rows = await db.all(`
+  const LEADERBOARD_SQL = group => `
       SELECT p.id AS playerId, p.name, p.group_name AS "group", p.avatar, a.score, a.correct, a.total, a.title,
              a.deduction_correct AS solved, (a.finished_at - a.started_at) AS durationMs
       FROM attempts a JOIN players p ON p.id = a.player_id
       WHERE a.status = 'done' ${group ? "AND p.group_name = ?" : ""}
-      ORDER BY a.score DESC, durationMs ASC`, group ? [group] : []);
+      ORDER BY a.score DESC, durationMs ASC`;
+  function bestRows(rows) {
     const seen = new Set();
     return rows.filter(r => !seen.has(r.playerId) && seen.add(r.playerId))
       .map(r => ({ ...r, solved: !!r.solved, duration: Math.round(r.durationMs / 1000) }));
+  }
+  async function leaderboardRows(group = null) {
+    return bestRows(await db.all(LEADERBOARD_SQL(group), group ? [group] : []));
   }
 
   /* ------------------------------ Обработчики ------------------------------ */
@@ -134,7 +155,7 @@ export function createApp({ db, env = {}, now = () => Date.now(), rnd = Math.ran
       return json(200, {
         timeLimitMs: RULES.TIME_LIMIT_MS, total: TOTAL_CASES, avatars: AVATAR_COUNT, deductionBonus: RULES.DEDUCTION_BONUS,
         chapters: CHAPTERS.map(({ n, title, place, size }) => ({ n, title, place, size })), mainCase: MAIN_CASE,
-      });
+      }, { "cache-control": "public, max-age=300" });
     },
 
     async start(req) {
@@ -145,42 +166,47 @@ export function createApp({ db, env = {}, now = () => Date.now(), rnd = Math.ran
       if (!group) throw new HttpError(400, "BAD_GROUP", "Укажите группу.");
       const key = norm(name) + "|" + norm(group);
 
-      // При повторном входе меняется только аватар: имя остаётся в том написании, как в первый раз
-      await db.run(`INSERT INTO players (key, name, group_name, avatar, created_at) VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(key) DO UPDATE SET avatar = excluded.avatar`,
-        [key, name, group, avatar, now()]);
-      const player = await db.get("SELECT id FROM players WHERE key = ?", [key]);
-
-      // Незаконченная попытка продолжается — даже с другого устройства
-      const active = await db.get("SELECT id FROM attempts WHERE player_id = ? AND status = 'active' ORDER BY started_at DESC LIMIT 1", [player.id]);
-      if (active) return json(200, { attemptId: active.id, resumed: true });
-
+      // Всё за один запрос к базе: игрок → новая попытка (если лимит позволяет и нет незаконченной) → текущая попытка.
+      // При повторном входе меняется только аватар: имя остаётся в том написании, как в первый раз.
       const id = randomUUID();
-      const ins = await db.run(`
-        INSERT INTO attempts (id, player_id, deck, total, started_at)
-        SELECT ?, ?, ?, ?, ?
-        WHERE (SELECT COUNT(*) FROM attempts WHERE player_id = ?) <
-              ? + (SELECT extra_attempts FROM players WHERE id = ?)
-                + COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'extra_all'), 0)`,
-        [id, player.id, JSON.stringify(buildDeck(rnd)), TOTAL_CASES, now(), player.id, RULES.BASE_ATTEMPTS, player.id]);
-      if (!ins.changes) throw new HttpError(409, "BLOCKED", "Вы уже проходили проверку. Ещё одну попытку может разрешить руководитель лаборатории.");
-      return json(201, { attemptId: id, resumed: false });
+      const [, , cur] = await db.batch([
+        { sql: `INSERT INTO players (key, name, group_name, avatar, created_at) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET avatar = excluded.avatar`, args: [key, name, group, avatar, now()] },
+        { sql: `INSERT INTO attempts (id, player_id, deck, total, started_at)
+                SELECT ?, p.id, ?, ?, ? FROM players p
+                WHERE p.key = ?
+                  AND NOT EXISTS (SELECT 1 FROM attempts x WHERE x.player_id = p.id AND x.status = 'active')
+                  AND (SELECT COUNT(*) FROM attempts x WHERE x.player_id = p.id) <
+                      ? + p.extra_attempts + COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'extra_all'), 0)`,
+          args: [id, JSON.stringify(buildDeck(rnd)), TOTAL_CASES, now(), key, RULES.BASE_ATTEMPTS] },
+        { sql: `SELECT a.id FROM attempts a JOIN players p ON p.id = a.player_id
+                WHERE p.key = ? AND a.status = 'active' ORDER BY a.started_at DESC LIMIT 1`, args: [key] },
+      ]);
+      const active = cur.rows[0]?.id;
+      if (!active) throw new HttpError(409, "BLOCKED", "Вы уже проходили проверку. Ещё одну попытку может разрешить руководитель лаборатории.");
+      return json(active === id ? 201 : 200, { attemptId: active, resumed: active !== id });
     },
 
     async getAttempt(req, [id]) {
-      const a = await settleTimeouts(await loadAttempt(id));
-      return json(200, await stateOf(a));
+      let { a, rows } = await loadFull(id);
+      if (await settleTimeouts(a)) ({ a, rows } = await loadFull(id));
+      return json(200, await stateOf(a, rows));
     },
 
     /** Открыть следующее дело — с этого момента идёт время. Повторный вызов возвращает то же дело. */
     async open(req, [id]) {
-      let a = await settleTimeouts(await loadAttempt(id));
-      if (a.status !== "active" || a.position >= a.total) return json(200, await stateOf(a));
-      if (a.shown_at == null) {
-        await db.run("UPDATE attempts SET shown_at = ? WHERE id = ? AND shown_at IS NULL AND status = 'active'", [now(), id]);
-        a = await loadAttempt(id);
+      for (let i = 0; i < 3; i++) {
+        // Обычно один запрос к базе: «запустить время, если ещё не запущено» + прочитать попытку
+        const [, sel] = await db.batch([
+          { sql: "UPDATE attempts SET shown_at = ? WHERE id = ? AND shown_at IS NULL AND status = 'active' AND position < total", args: [now(), id] },
+          { sql: SELECT_ATTEMPT, args: [id] },
+        ]);
+        const a = parseAttempt(sel.rows[0]);
+        if (a.status !== "active" || a.position >= a.total) return json(200, { state: await stateOf(a) });
+        if (await settleTimeouts(a)) continue; // дело было открыто давно и просрочено — открываем следующее
+        return json(200, { question: questionOf(a), score: a.score, position: a.position, total: a.total });
       }
-      return json(200, { question: questionOf(a), score: a.score, position: a.position, total: a.total });
+      return json(200, { state: await stateOf(await loadAttempt(id)) });
     },
 
     async answer(req, [id]) {
@@ -188,13 +214,11 @@ export function createApp({ db, env = {}, now = () => Date.now(), rnd = Math.ran
       const a = await loadAttempt(id);
       if (a.status !== "active") throw new HttpError(409, "FINISHED", "Проверка уже завершена.");
       if (Number(b.position) !== a.position || a.shown_at == null) throw new HttpError(409, "STALE", "Это дело уже закрыто.", { position: a.position });
-      const result = await record(a, b.option ?? null);
+      const { rows, ...result } = await record(a, b.option ?? null);
       const ch = chapterAt(result.position);
-      let chapterEnd = null;
-      if (ch && result.position === ch.end) {
-        chapterEnd = (await chapterProgress(a.id)).find(c => c.n === ch.n);
-      }
-      return json(200, { ...result, chapterEnd, finished: a.position >= a.total });
+      const chapterEnd = ch && result.position === ch.end ? (await chapterProgress(a.id, rows)).find(c => c.n === ch.n) : null;
+      const finished = a.position >= a.total;
+      return json(200, { ...result, chapterEnd, finished, suspects: finished ? SUSPECTS : null });
     },
 
     async deduction(req, [id]) {
@@ -208,16 +232,17 @@ export function createApp({ db, env = {}, now = () => Date.now(), rnd = Math.ran
       await db.run(`UPDATE attempts SET status = 'done', deduction = ?, deduction_correct = ?, score = score + ?, title = ?, finished_at = ?
         WHERE id = ? AND status = 'active'`,
         [b.suspect, solved ? 1 : 0, solved ? RULES.DEDUCTION_BONUS : 0, rankFor(a.correct, a.total).title, finishedAt, id]);
-      return json(200, await stateOf(await loadAttempt(id)));
+      const full = await loadFull(id);
+      return json(200, await stateOf(full.a, full.rows));
     },
 
     async leaderboard(req, _, url) {
       const group = url.searchParams.get("group") || null;
-      const [rows, groups] = await Promise.all([
-        leaderboardRows(group),
-        db.all("SELECT DISTINCT p.group_name AS g FROM players p JOIN attempts a ON a.player_id = p.id WHERE a.status = 'done' ORDER BY g"),
+      const [lb, gr] = await db.batch([
+        { sql: LEADERBOARD_SQL(group), args: group ? [group] : [] },
+        { sql: "SELECT DISTINCT p.group_name AS g FROM players p JOIN attempts a ON a.player_id = p.id WHERE a.status = 'done' ORDER BY g" },
       ]);
-      return json(200, { rows: rows.slice(0, 200).map(({ playerId, durationMs, ...r }) => r), groups: groups.map(g => g.g) });
+      return json(200, { rows: bestRows(lb.rows).slice(0, 200).map(({ playerId, durationMs, ...r }) => r), groups: gr.rows.map(g => g.g) });
     },
 
     /* ------------------------------ Руководитель ------------------------------ */
@@ -235,16 +260,16 @@ export function createApp({ db, env = {}, now = () => Date.now(), rnd = Math.ran
       await auth.require(req);
       const group = url.searchParams.get("group") || null;
       const where = group ? "WHERE p.group_name = ?" : "", args = group ? [group] : [];
-      const [players, attempts, caseStats, extraAllRow, groupRows] = await Promise.all([
-        db.all(`SELECT p.id, p.name, p.group_name AS "group", p.avatar, p.extra_attempts AS extra FROM players p ${where} ORDER BY p.name`, args),
-        db.all(`SELECT a.id, a.player_id AS playerId, a.status, a.position, a.total, a.score, a.correct, a.title, a.deduction_correct AS solved,
-                       a.started_at AS startedAt, a.finished_at AS finishedAt FROM attempts a JOIN players p ON p.id = a.player_id ${where}`, args),
-        db.all(`SELECT ans.case_id AS id, COUNT(*) AS n, SUM(ans.correct) AS ok FROM answers ans
-                JOIN attempts t ON t.id = ans.attempt_id JOIN players p ON p.id = t.player_id ${where} GROUP BY ans.case_id`, args),
-        db.get("SELECT value FROM settings WHERE key = 'extra_all'"),
-        db.all("SELECT DISTINCT group_name AS g FROM players ORDER BY g"),
-      ]);
-      const extraAll = Number(extraAllRow?.value || 0);
+      const [players, attempts, caseStats, extraAllRow, groupRows] = (await db.batch([
+        { sql: `SELECT p.id, p.name, p.group_name AS "group", p.avatar, p.extra_attempts AS extra FROM players p ${where} ORDER BY p.name`, args },
+        { sql: `SELECT a.id, a.player_id AS playerId, a.status, a.position, a.total, a.score, a.correct, a.title, a.deduction_correct AS solved,
+                       a.started_at AS startedAt, a.finished_at AS finishedAt FROM attempts a JOIN players p ON p.id = a.player_id ${where}`, args },
+        { sql: `SELECT ans.case_id AS id, COUNT(*) AS n, SUM(ans.correct) AS ok FROM answers ans
+                JOIN attempts t ON t.id = ans.attempt_id JOIN players p ON p.id = t.player_id ${where} GROUP BY ans.case_id`, args },
+        { sql: "SELECT value FROM settings WHERE key = 'extra_all'" },
+        { sql: "SELECT DISTINCT group_name AS g FROM players ORDER BY g" },
+      ])).map(r => r.rows);
+      const extraAll = Number(extraAllRow[0]?.value || 0);
       const byPlayer = new Map(players.map(p => [p.id, { ...p, attempts: [] }]));
       for (const a of attempts) byPlayer.get(a.playerId)?.attempts.push({ ...a, solved: !!a.solved, duration: a.finishedAt ? Math.round((a.finishedAt - a.startedAt) / 1000) : null });
       const list = [...byPlayer.values()].map(p => {
@@ -334,7 +359,7 @@ export function createApp({ db, env = {}, now = () => Date.now(), rnd = Math.ran
   return async function handle(req) {
     const url = new URL(req.url, "http://local");
     try {
-      await ensureSchema(db);
+      if (url.pathname !== "/api/config") await ensureSchema(db); // конфигурации база не нужна — отвечаем сразу
       for (const [method, re, h] of routes) {
         const m = url.pathname.match(re);
         if (m) {

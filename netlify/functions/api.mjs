@@ -6,7 +6,7 @@ let app = null;
 
 export default async (req, context) => {
   try {
-    app ??= createApp({ db: await getDb(process.env), env: process.env });
+    app ??= createApp({ db: await getDb(process.env, { hosted: true }), env: process.env });
     const url = new URL(req.url);
     const out = await app({
       method: req.method,

@@ -1,6 +1,7 @@
 /**
- * Смена стажёра — сюжетная часть. Состояние всегда берётся с сервера (GET /attempts/:id),
- * а этот модуль решает, какую сцену показать: пролог → титр главы → дела → итог главы → … → дедукция → финал.
+ * Смена стажёра — сюжетная часть. Состояние загружается с сервера один раз (GET /attempts/:id), дальше
+ * обновляется по ответам сервера — без лишних запросов между делами. Модуль решает, какую сцену показать:
+ * пролог → титр главы → дела → итог главы → … → дедукция → финал.
  * Каждая сцена — функция, которая рисует экран и возвращает Promise, завершающийся по действию игрока.
  */
 import { html, mount, $, $$, sleep, toast, prefersReducedMotion } from "../ui/dom.js";
@@ -63,12 +64,34 @@ export default async function game(ctx) {
       if (!alive()) return;
       let q = s.question;
       if (!q) {
-        try { q = (await withRetry(() => api.open(id))).question; } catch (e) { return fatal(e); }
+        const slow = setTimeout(() => alive() && opening(s, ch), 120); // заглушка, только если сервер задумался
+        let o;
+        try { o = await withRetry(() => api.open(id)); } catch (e) { clearTimeout(slow); return fatal(e); }
+        clearTimeout(slow);
+        if (o.state) { s = o.state; continue; }
+        q = o.question;
       }
-      if (!q) { s = await load(); continue; }
-      await caseScene(q, s, ch);
-      s = await load();
+      const r = await caseScene(q, s, ch);
+      if (!r) { s = await load(); continue; } // ответ уже был засчитан в другой вкладке — берём свежее состояние
+      applyAnswer(s, r);
     }
+  }
+
+  /** Обновить состояние по ответу сервера — без повторной загрузки. */
+  function applyAnswer(s, r) {
+    s.history = [...s.history.slice(0, r.position), r.correct];
+    s.score = r.score;
+    s.correct += r.correct ? 1 : 0;
+    s.position = r.position + 1;
+    s.question = null;
+    if (r.chapterEnd) s.chapters = s.chapters.map(c => (c.n === r.chapterEnd.n ? r.chapterEnd : c));
+    if (r.finished) { s.phase = "deduction"; s.suspects = r.suspects; }
+  }
+
+  /** Заглушка на время открытия папки. */
+  function opening(s, ch) {
+    mount(ctx.root, html`<div class="wrap"><article class="folder skeleton" data-tab="Дело № ${s.position + 1} · глава ${ch ? ch.n : ""}">
+      <div class="boot" style="min-height:240px"><span class="spinner"></span>Открываю папку…</div></article></div>`);
   }
 
   /* ---------------- Катсцена с диалогом ---------------- */
@@ -171,14 +194,18 @@ export default async function game(ctx) {
         cancelAnimationFrame(raf);
         ring.classList.remove("low");
         const btns = $$(".opt", ctx.root);
-        btns.forEach(b => { b.disabled = true; });
+        btns.forEach(b => { b.disabled = true; b.classList.toggle("pending", b.dataset.opt === option); });
+        $(".folder").classList.add("checking");
         let r;
         try { r = await withRetry(() => api.answer(id, q.position, option)); }
         catch (e) {
-          if (e.code === "STALE" || e.code === "FINISHED") { resolve(); return; } // ответ уже засчитан (например, с другой вкладки)
-          toast(e.message); answered = false; btns.forEach(b => { b.disabled = false; }); raf = requestAnimationFrame(tick); return;
+          if (e.code === "STALE" || e.code === "FINISHED") { resolve(null); return; } // ответ уже засчитан (например, с другой вкладки)
+          toast(e.message); answered = false; $(".folder")?.classList.remove("checking");
+          btns.forEach(b => { b.disabled = false; b.classList.remove("pending"); }); raf = requestAnimationFrame(tick); return;
         }
         if (!alive()) return;
+        $(".folder").classList.remove("checking");
+        btns.forEach(b => b.classList.remove("pending"));
         btns.forEach(b => b.classList.add(b.dataset.opt === r.correctOption ? "right" : b.dataset.opt === r.chosen ? "wrong" : "dim"));
         const stamp = document.createElement("div");
         stamp.className = "stamp " + (r.correct ? "ok" : "bad");
@@ -195,7 +222,7 @@ export default async function game(ctx) {
           ${speaker("mentor", `${r.correct ? pick(PRAISE) : r.timeout ? pick(TIMEOUT_LINES) : pick(SCOLD)} ${r.explain}`, { mood: r.correct ? "happy" : "sad", quote: false })}
           <button class="btn" id="next">${label}</button></div>`);
         const nb = $("#next");
-        nb.onclick = () => { offKeys(); resolve(); };
+        nb.onclick = () => { offKeys(); resolve(r); };
         nb.focus({ preventScroll: true });
         nb.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "nearest" });
       }

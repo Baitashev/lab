@@ -10,6 +10,14 @@ export async function createSqlite(file = ":memory:") {
     async get(sql, args = []) { return db.prepare(sql).get(...norm(args)) ?? null; },
     async run(sql, args = []) { const r = db.prepare(sql).run(...norm(args)); return { changes: Number(r.changes) }; },
     async exec(sql) { db.exec(sql); },
+    /** Несколько запросов подряд на одном соединении — как один pipeline в Turso. */
+    async batch(stmts) {
+      return stmts.map(({ sql, args = [] }) => {
+        const st = db.prepare(sql);
+        if (st.columns().length) return { rows: st.all(...norm(args)), changes: 0 };
+        return { rows: [], changes: Number(st.run(...norm(args)).changes) };
+      });
+    },
     close() { db.close(); },
   };
 }

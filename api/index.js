@@ -25,7 +25,7 @@ async function readBody(req) {
 
 export default async function handler(req, res) {
   try {
-    app ??= createApp({ db: await getDb(process.env), env: process.env });
+    app ??= createApp({ db: await getDb(process.env, { hosted: true }), env: process.env });
     const ip = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket?.remoteAddress;
     const out = await app({ method: req.method, url: originalUrl(req.url), headers: req.headers, body: await readBody(req), ip });
     res.statusCode = out.status;

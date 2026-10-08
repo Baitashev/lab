@@ -10,6 +10,7 @@ export const PEOPLE = {
   kanat:{name:"Канат",role:"одногруппник",skin:"#E3B995",hair:"#5A3A22",style:"short",outfit:"#C2553A",shirt:"#F0D4C8",bg:"#F5DCD3"},
   adv:{name:"Тимур Исаков",role:"адвокат",skin:"#DDB08A",hair:"#1E1814",style:"short",outfit:"#3A3F55",shirt:"#F2F2F2",glasses:true,bg:"#DCDFEA"},
   aipery:{name:"Айпери Токтосунова",role:"эксперт-почерковед",skin:"#E9C29E",hair:"#2A1D17",style:"long",outfit:"#F3F5F6",shirt:"#B85C6E",coat:true,bg:"#F3E0D6"},
+  prosecutor:{name:"Сарбанова Салима Санджаровна",role:"прокурор",skin:"#DDB08F",hair:"#20160F",style:"bun",outfit:"#1E3557",shirt:"#F2F4F7",badge:true,epaulets:true,bg:"#D6DFEC"},
   gulzat:{name:"Гулзат эже",role:"соседка",skin:"#D8A882",hair:"#3B2A22",style:"long",outfit:"#7A4E8C",shirt:"#EAD8F0",bg:"#F0DDE8"}
 };
 export const AVATARS = [
@@ -44,6 +45,7 @@ function portraitSvg(p, mood="neutral"){
   const coat = p.coat ? `<path d="M50 71L40 100M50 71L60 100" stroke="#C9D1D6" stroke-width="1.4"/>` : "";
   const collar = `<path d="M42 70L50 84L58 70Z" fill="${p.shirt}"/>`;
   const jabot = p.jabot ? `<path d="M45 72H55L53 88H47Z" fill="#FFFFFF"/><path d="M47 76H53M47.5 80H52.5" stroke="#d6d6d6"/>` : "";
+  const epaulets = p.epaulets ? `<g fill="#D9A82B"><rect x="17" y="78" width="15" height="4.5" rx="1.5" transform="rotate(-24 24 80)"/><rect x="68" y="78" width="15" height="4.5" rx="1.5" transform="rotate(24 76 80)"/></g>` : "";
   const badge = p.badge ? `<path d="M66 82L70 80L74 82L73 88L70 90L67 88Z" fill="#E9B824"/>` : "";
   return `<svg viewBox="0 0 100 100" role="img" aria-label="${p.name||'Аватар'}" xmlns="http://www.w3.org/2000/svg">
     <defs><clipPath id="${cid}"><circle cx="50" cy="50" r="50"/></clipPath></defs>
@@ -51,7 +53,7 @@ function portraitSvg(p, mood="neutral"){
       <circle cx="50" cy="50" r="50" fill="${p.bg}"/>
       ${hairBack}
       <path d="M12 102C14 79 31 69 50 69C69 69 86 79 88 102Z" fill="${p.outfit}"/>
-      ${collar}${jabot}${coat}${badge}
+      ${collar}${jabot}${coat}${epaulets}${badge}
       <rect x="44" y="57" width="12" height="15" rx="5" fill="${p.skin}"/>
       <ellipse cx="50" cy="45" rx="19" ry="21" fill="${p.skin}"/>
       <ellipse cx="31.5" cy="47" rx="3" ry="4.5" fill="${p.skin}"/><ellipse cx="68.5" cy="47" rx="3" ry="4.5" fill="${p.skin}"/>

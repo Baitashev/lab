@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS attempts (
   deduction TEXT,
   deduction_correct INTEGER,
   title TEXT,
+  answer_token TEXT,
   started_at INTEGER NOT NULL,
   finished_at INTEGER
 );
@@ -43,8 +44,18 @@ CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, expires_at INT
 CREATE TABLE IF NOT EXISTS login_fails (ip TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL)
 `;
 
+/** Изменения схемы для баз, созданных прошлыми версиями. Ошибка «колонка уже есть» — это нормально. */
+const MIGRATIONS = ["ALTER TABLE attempts ADD COLUMN answer_token TEXT"];
+
+async function migrate(db) {
+  await db.exec(SCHEMA);
+  for (const sql of MIGRATIONS) {
+    try { await db.run(sql); } catch (e) { if (!/duplicate column/i.test(String(e.message))) throw e; }
+  }
+}
+
 const ready = new WeakMap();
 export function ensureSchema(db) {
-  if (!ready.has(db)) ready.set(db, db.exec(SCHEMA).catch(e => { ready.delete(db); throw e; }));
+  if (!ready.has(db)) ready.set(db, migrate(db).catch(e => { ready.delete(db); throw e; }));
   return ready.get(db);
 }
